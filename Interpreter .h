@@ -2,11 +2,15 @@
 #define PROJECT1LEXER_INTERPRETER_H
 #include "DatalogProgram.h"
 #include "Database.h"
+#include "Graph.h"
 
 class Interpreter {
 private:
     DatalogProgram program;
     Database database;
+    Graph graph;
+    set<unsigned int> dependencies;
+    set<unsigned int> reverseDependencies;
 
 public:
     Interpreter() {}
@@ -15,6 +19,9 @@ public:
     void run() {
         evalSchemes();
         evalFacts();
+        createGraph();
+        createReverseGraph();
+        postOrder();
         evalRules();
         evalQueries();
     }
@@ -44,52 +51,125 @@ public:
         }
     }
 
+    void createGraph() {
+        unsigned int i = 0;
+        for (Rule rule : program.getRules()) {
+            for (Predicate predicate : rule.getBody()) {
+                unsigned int j = 0;
+                for (Rule rule2 : program.getRules()) {
+                    if (rule2.getHead().getName() == predicate.getName()) {
+                        dependencies.insert(j);
+                    }
+                    ++j;
+                }
+            }
+            graph.addToGraph(i, dependencies);
+            dependencies.clear();
+            ++i;
+        }
+        cout << "Dependency Graph" << endl;
+        cout << graph.toString() << endl;
+    }
+
+    void createReverseGraph() {
+        unsigned int i = 0;
+        for (Rule rule : program.getRules()) {
+            unsigned int j = 0;
+            for (Rule rule2 : program.getRules()) {
+                for (Predicate predicate : rule2.getBody()) {
+                    if (rule.getHead().getName() == predicate.getName()) {
+                        reverseDependencies.insert(j);
+                    }
+                }
+                ++j;
+            }
+            graph.addToReverseGraph(i, reverseDependencies);
+            reverseDependencies.clear();
+            ++i;
+        }
+    }
+
+    void postOrder() {
+        graph.dfsReverse();
+        graph.dfs();
+    }
+
     void evalRules() {
         cout << "Rule Evaluation" << endl;
-        bool changed = true;
-        unsigned int counter = 0;
-        while (changed) {
-            changed = false;
-            for (Rule rule : program.getRules()) {
-                Relation* result = nullptr;
-                for (Predicate predicate : rule.getBody()) {
-                    if (result == nullptr) {
-                        result = evaluatePredicate(predicate);
-                    }
-                    else {
-                        result = result->naturalJoin(evaluatePredicate(predicate));
-                    }
+        vector<set<int>> sCCs = graph.getScCs();
+        for (unsigned int i = 0; i < sCCs.size(); i++) {
+            cout << "SCC: ";
+            bool firstItem = true;
+            for (int rVal : sCCs[i]) {
+                if (!firstItem) {
+                    cout << ",";
                 }
-                Predicate p = rule.getHead();
-                vector<string> relationHeader = result->getHeader().getAttributes();
-                map<string, unsigned int> headerValues;
-                unsigned int i = 0;
-                for (i = 0; i < relationHeader.size(); ++i) {
-                    headerValues[relationHeader.at(i)] = i;
-                }
-                vector<unsigned int> headerIndex;
-                for (Parameter param : p.getParameters()) {
-                    if (headerValues.find(param.getValue()) != headerValues.end()) {
-                        unsigned int index = headerValues[param.getValue()];
-                        headerIndex.push_back(index);
-                    }
-                }
-                result = result->project(headerIndex);
-                result = result->rename(database.getRelation(p.getName())->getHeader().getAttributes());
-                result->setTuples(database.getRelation(p.getName())->newUnion(result));
-                if (result->size() > 0) {
-                    changed = true;
-                }
-                cout << rule.toString() << "." << endl;
-                cout << result->toString();
+                firstItem = false;
+                cout << "R" << rVal;
             }
-            counter++;
+            cout << endl;
+            bool changed = true;
+            bool equal = false;
+            unsigned int counter = 0;
+            vector<Rule> rules = program.getRules();
+            while (changed) {
+                // additional checks I need to make sure the SCC is size 1
+                //if the SCC is size 1, then only loop once
+                //if the SCC is not dependent on itself, as in the head predicate and body don't match
+                // use a check at the end of while loop then break if both these hold
+                changed = false;
+                counter++;
+                for (unsigned int j : sCCs[i]) {
+                    Relation *result = nullptr;
+                    for (Predicate predicate: rules[j].getBody()) {
+                        if (result == nullptr) {
+                            result = evaluatePredicate(predicate);
+                        }
+                        else {
+                            result = result->naturalJoin(evaluatePredicate(predicate));
+                        }
+                        if (predicate.getName() == rules[j].getHead().getName()) {
+                            equal = true;
+                        }
+                    }
+                    Predicate p = rules[j].getHead();
+                    vector<string> relationHeader = result->getHeader().getAttributes();
+                    map<string, unsigned int> headerValues;
+                    for (unsigned int k = 0; k < relationHeader.size(); ++k) {
+                        headerValues[relationHeader.at(k)] = k;
+                    }
+                    vector<unsigned int> headerIndex;
+                    for (Parameter param: p.getParameters()) {
+                        if (headerValues.find(param.getValue()) != headerValues.end()) {
+                            unsigned int index = headerValues[param.getValue()];
+                            headerIndex.push_back(index);
+                        }
+                    }
+                    result = result->project(headerIndex);
+                    result = result->rename(database.getRelation(p.getName())->getHeader().getAttributes());
+                    result->setTuples(database.getRelation(p.getName())->newUnion(result));
+                    if (result->size() > 0) {
+                        changed = true;
+                    }
+                    cout << rules[j].toString() << "." << endl;
+                    cout << result->toString();
+                }
+                if (sCCs[i].size() == 1 && !equal) {
+                    break;
+                }
+            }
+            cout << counter << " passes: ";
+            string sep = "";
+            for (unsigned int k : sCCs[i]) {
+                cout << sep << "R" << k;
+                sep = ",";
+            }
+            cout << endl;
         }
-        cout << endl << "Schemes populated after " << counter << " passes through the Rules." << endl << endl;
     }
 
     void evalQueries() {
-        cout << "Query Evaluation" << endl;
+        cout << endl << "Query Evaluation" << endl;
         for (Predicate query : program.getQueries()) {
             Relation* result = evaluatePredicate(query);
             cout << query.toString() << "? ";
